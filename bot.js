@@ -1144,7 +1144,11 @@ class BaseballBot {
                 '--stadium_paths', stadiumPathsFile
             ];
 
-            execFile('python', args, { timeout: 30000 }, (error, stdout, stderr) => {
+            // Use venv Python if available, fall back to system python
+            const venvPython = path.join(__dirname, 'venv', 'bin', 'python');
+            const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python';
+
+            execFile(pythonCmd, args, { timeout: 30000 }, (error, stdout, stderr) => {
                 if (error) {
                     this.log(`HR analysis error: ${error.message}`);
                     if (stderr) this.log(`HR analysis stderr: ${stderr}`);
