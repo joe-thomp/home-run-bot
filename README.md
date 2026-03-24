@@ -1,68 +1,64 @@
 # home-run-bot
 
-A Discord bot that monitors MLB players for home runs and sends real-time alerts to your server. When a tracked player goes yard, the bot posts a quick notification, then follows up with Statcast details (exit velo, launch angle, distance) and a ballpark overlay image showing the hit.
+Discord bot that watches MLB players and posts to your server when they hit a home run.
 
-## Features
+The bot polls the [MLB Stats API](https://statsapi.mlb.com) every 5 minutes. When it finds a new homer, it sends a Discord embed with the player, distance, and RBI count. A few seconds later, it grabs Statcast data from [Baseball Savant](https://baseballsavant.mlb.com), generates a ballpark overlay image (exit velo, launch angle, spray direction, wall clearance), and posts that too.
 
-- Checks tracked players every 5 minutes using the MLB Stats API
-- Sends alerts to one or more Discord channels
-- Includes HR distance, RBI type, and season totals
-- Generates a ballpark overlay image with spray direction and wall distance
-- Persists state to disk so restarts don't re-send old alerts
-- Discord commands for checking stats and managing the bot
+State lives on disk. Restarts don't re-send old alerts.
 
-## Quick Start
+## Data sources
 
-### Prerequisites
+- **MLB Stats API** — live game feeds, player stats, home run counts
+- **Baseball Savant** — Statcast metrics (exit velocity, launch angle, spray angle)
+- **MLB headshot CDN** — player photos, pulled automatically by player ID
 
-- [Node.js](https://nodejs.org/) 18+
-- [Python](https://www.python.org/) 3.10+ (for ballpark overlay images)
-- A Discord bot token ([create one here](https://discord.com/developers/applications))
-  - Enable the **Message Content Intent** under Bot settings
-  - Give the bot permissions: View Channels, Send Messages, Embed Links, Attach Files, Read Message History
+No API keys needed. All three are public.
 
-### Installation
+## Setup
+
+You need Node.js 18+, Python 3.10+, and a Discord bot token.
+
+### 1. Create the Discord bot
+
+Go to the [Discord Developer Portal](https://discord.com/developers/applications). Create a new application. Under **Bot**, enable **Message Content Intent**. Copy the bot token.
+
+Invite the bot to your server with these permissions: View Channels, Send Messages, Embed Links, Attach Files, Read Message History.
+
+### 2. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/home-run-bot.git
+git clone https://github.com/joe-thomp/home-run-bot.git
 cd home-run-bot
 npm install
 pip install -r requirements.txt
 ```
 
-### Configuration
+### 3. Configure
 
-Copy `.env.example` to `.env` and fill in your values:
+Copy `.env.example` to `.env`:
 
 ```env
 BOT_TOKEN=your_discord_bot_token
-CHANNEL_ID=your_discord_channel_id
+CHANNEL_ID=your_channel_id
 ADMIN_USER_IDS=your_discord_user_id
 BOT_USERNAME=home-run-bot
 ```
 
-| Variable | Description |
-|---|---|
-| `BOT_TOKEN` | Your Discord bot token |
-| `CHANNEL_ID` | Channel ID(s) to post alerts in. Comma-separated for multiple channels. |
-| `ADMIN_USER_IDS` | (Optional) Comma-separated Discord user IDs allowed to run admin commands |
-| `BOT_USERNAME` | (Optional) Bot display name to sync on startup |
+`CHANNEL_ID` accepts a single ID or a comma-separated list. Every alert goes to every channel.
 
-### Run
+`ADMIN_USER_IDS` is optional. Comma-separated Discord user IDs that can run debug and reset commands. Server admins can run them regardless.
+
+### 4. Start
 
 ```bash
 npm start
 ```
 
-For development with auto-restart:
+`npm run dev` if you want auto-restart on file changes.
 
-```bash
-npm run dev
-```
+## Track your own players
 
-## Tracking Your Own Players
-
-The tracked players are defined near the top of `bot.js` in the `this.players` object. Each entry uses the player's [MLB player ID](https://www.mlb.com/) as the key:
+Open `bot.js`. The `this.players` object near the top defines who the bot watches:
 
 ```js
 this.players = {
@@ -71,53 +67,52 @@ this.players = {
 };
 ```
 
-**To add a player:**
+The key is the MLB player ID. Find it in the URL of any player page on [mlb.com](https://www.mlb.com/player/) (e.g. `mlb.com/player/aaron-judge-592450`).
 
-1. Find their MLB player ID (it's in the URL on their [MLB.com player page](https://www.mlb.com/player/))
-2. Add an entry to `this.players` in `bot.js`
-3. (Optional) Add a shortcut command in the `handleCommand()` method (e.g. `!judge`)
+Add a player: new entry in `this.players`. Optionally add a shortcut command in `handleCommand()` (like `!judge`).
 
-**To remove a player:** delete their entry from `this.players` and remove any matching command in `handleCommand()`.
+Remove a player: delete the entry and its command.
 
-Player headshot images are automatically pulled from MLB based on the player ID.
+Headshots resolve automatically from the player ID. No extra config.
 
 ## Commands
 
-### Public
+**Anyone can run:**
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `!players` | List all tracked players |
-| `!hrstats` | Show HR stats for all tracked players |
-| `!judge`, `!soto`, etc. | Show stats for a specific player |
+| `!players` | Lists tracked players |
+| `!hrstats` | Season HR stats for all tracked players |
+| `!judge`, `!soto`, etc. | Stats for one player |
 
-### Admin Only
+**Admin only:**
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `!forcecheck` | Manually trigger a home run check |
-| `!testhr` | Send a test home run alert |
-| `!reset [player]` | Reset a player's HR tracking state |
-| `!debug` | Show bot debug info |
+| `!forcecheck` | Run a home run check right now |
+| `!testhr` | Send a fake alert to test formatting |
+| `!reset [player]` | Reset a player's tracking state |
+| `!debug` | Dump bot internals |
 
-## How It Works
+## How it works
 
-1. Every 5 minutes, the bot queries the MLB Stats API for each tracked player's HR count
-2. When a new HR is detected, it sends a quick alert embed to Discord
-3. It then waits for detailed Statcast data (exit velo, launch angle, spray angle)
-4. A Python script generates a ballpark overlay image showing where the ball landed
-5. The bot posts a follow-up message with the full details and image
+The bot checks each tracked player's HR total every 5 minutes via the MLB Stats API. When the count goes up, it:
 
-State is saved in `data/bot_state.json` so the bot remembers what it's already reported across restarts.
+1. Sends an alert embed to Discord with the player name, HR number, distance, and RBI type.
+2. Pulls Statcast data for that at-bat from Baseball Savant.
+3. Runs `scripts/hr_analysis.py` to render a ballpark image showing the hit's trajectory, landing spot, and wall clearance.
+4. Posts a follow-up embed with the image and full Statcast breakdown.
 
-## Project Structure
+Tracking state saves to `data/bot_state.json` after every check. The bot skips home runs it already reported, even across restarts.
+
+## Files
 
 ```
-bot.js                  - Main bot logic
-scripts/hr_analysis.py  - Ballpark overlay image generation
-data/fences.json        - Stadium fence coordinates
-data/stadium_paths.json - Stadium outline data
-data/bot_state.json     - Runtime state (auto-generated, git-ignored)
+bot.js                  Main bot
+scripts/hr_analysis.py  Ballpark image generation
+data/fences.json        Stadium fence coordinates
+data/stadium_paths.json Stadium outlines
+data/bot_state.json     Runtime state (git-ignored)
 ```
 
 ## License
