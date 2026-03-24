@@ -1,0 +1,32 @@
+{
+  "name": "home-run-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that tracks MLB home runs, distance, and ballpark overlays",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.6",
+    "csv-parse": "^5.6.0",
+    "discord.js": "^14.25.1",
+    "dotenv": "^17.3.1",
+    "node-cron": "^4.2.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "overrides": {
+    "undici": "^6.24.1"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "baseball",
+    "mlb",
+    "statcast",
+    "home-runs"
+  ],
+  "license": "MIT"
+}
