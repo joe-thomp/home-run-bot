@@ -2,7 +2,7 @@
 
 Discord bot that watches MLB players and posts to your server when they hit a home run.
 
-The bot polls the [MLB Stats API](https://statsapi.mlb.com) every 5 minutes. When it finds a new homer, it sends a Discord embed with the player, distance, and RBI count. A few seconds later, it grabs Statcast data from [Baseball Savant](https://baseballsavant.mlb.com), generates a ballpark overlay image (exit velo, launch angle, spray direction, wall clearance), and posts that too.
+The bot polls the [MLB Stats API](https://statsapi.mlb.com) every 4 minutes. When it finds a new homer, it sends a Discord embed with the player, distance, and RBI count. A few seconds later, it grabs Statcast data from [Baseball Savant](https://baseballsavant.mlb.com), generates a ballpark overlay image (exit velo, launch angle, spray direction, wall clearance), and posts that too.
 
 State lives on disk. Restarts don't re-send old alerts.
 
@@ -62,8 +62,8 @@ Open `bot.js`. The `this.players` object near the top defines who the bot watche
 
 ```js
 this.players = {
-    '592450': { name: 'Aaron Judge', team: 'NYY', number: '99', lastCheckedHR: 0, sentHomeRuns: new Set() },
-    '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set() },
+    '592450': { name: 'Aaron Judge', team: 'NYY', number: '99', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+    '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
 };
 ```
 
@@ -83,6 +83,8 @@ Headshots resolve automatically from the player ID. No extra config.
 |---|---|
 | `!players` | Lists tracked players |
 | `!hrstats` | Season HR stats for all tracked players |
+| `!parkstats` | Parks breakdown for all players (how many stadiums each HR would clear) |
+| `!parkstats [player]` | Parks breakdown for one player (e.g. `!parkstats judge`) |
 | `!judge`, `!soto`, etc. | Stats for one player |
 
 **Admin only:**
@@ -96,7 +98,7 @@ Headshots resolve automatically from the player ID. No extra config.
 
 ## How it works
 
-The bot checks each tracked player's HR total every 5 minutes via the MLB Stats API. When the count goes up, it:
+The bot checks each tracked player's HR total every 4 minutes via the MLB Stats API. When the count goes up, it:
 
 1. Sends an alert embed to Discord with the player name, HR number, distance, and RBI type.
 2. Pulls Statcast data for that at-bat from Baseball Savant.

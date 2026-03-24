@@ -22,13 +22,13 @@ class BaseballBot {
         
         // Players to monitor
         this.players = {
-            '592450': { name: 'Aaron Judge', team: 'NYY', number: '99', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '665862': { name: 'Jazz Chisholm Jr.', team: 'NYY', number: '13', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '665742': { name: 'Juan Soto', team: 'NYM', number: '22', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '656941': { name: 'Kyle Schwarber', team: 'PHI', number: '12', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '547180': { name: 'Bryce Harper', team: 'PHI', number: '3', lastCheckedHR: 0, sentHomeRuns: new Set() },
-            '683002': { name: 'Gunnar Henderson', team: 'BAL', number: '2', lastCheckedHR: 0, sentHomeRuns: new Set() }
+            '592450': { name: 'Aaron Judge', team: 'NYY', number: '99', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '665862': { name: 'Jazz Chisholm Jr.', team: 'NYY', number: '13', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '665742': { name: 'Juan Soto', team: 'NYM', number: '22', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '656941': { name: 'Kyle Schwarber', team: 'PHI', number: '12', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '547180': { name: 'Bryce Harper', team: 'PHI', number: '3', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '683002': { name: 'Gunnar Henderson', team: 'BAL', number: '2', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} }
         };
 
         this.statePath = options.statePath || path.join(__dirname, 'data', 'bot_state.json');
@@ -83,6 +83,7 @@ class BaseballBot {
                 this.players[playerId].sentHomeRuns = new Set(
                     Array.isArray(savedState.sentHomeRuns) ? savedState.sentHomeRuns : []
                 );
+                this.players[playerId].homeRunParks = savedState.homeRunParks || {};
                 restoredPlayers.add(playerId);
             }
 
@@ -104,7 +105,8 @@ class BaseballBot {
             for (const [playerId, playerData] of Object.entries(this.players)) {
                 serializedPlayers[playerId] = {
                     lastCheckedHR: playerData.lastCheckedHR,
-                    sentHomeRuns: Array.from(playerData.sentHomeRuns)
+                    sentHomeRuns: Array.from(playerData.sentHomeRuns),
+                    homeRunParks: playerData.homeRunParks || {}
                 };
             }
 
@@ -1179,6 +1181,15 @@ class BaseballBot {
 
         const successCount = await this.sendToConfiguredChannels(messageOptions, 'combined alert');
         this.log(`Combined alert sent to ${successCount}/${this.channelIds.length} channels for ${playerData.name}`);
+
+        // Store parks cleared count for this HR
+        if (analysisResult && Number.isFinite(analysisResult.total_dongs)) {
+            const hrId = this.buildHomeRunId(hrDetail);
+            playerData.homeRunParks[hrId] = analysisResult.total_dongs;
+            this.saveState();
+            this.log(`Stored parks data for ${playerData.name}: HR ${hrId} cleared ${analysisResult.total_dongs}/30 parks`);
+        }
+
         this.cleanupAnalysisImage(analysisResult?.image_path);
     }
 
@@ -1341,6 +1352,14 @@ class BaseballBot {
                 }
 
                 this.log(`HR analysis complete for ${playerData.name}: ${analysisResult.total_dongs}/30 parks`);
+
+                // Store parks cleared count for this HR
+                if (Number.isFinite(analysisResult.total_dongs)) {
+                    const hrId = this.buildHomeRunId(hrDetail);
+                    playerData.homeRunParks[hrId] = analysisResult.total_dongs;
+                    this.saveState();
+                }
+
                 await this.sendEnhancedFollowUp(playerData, totalHRs, statcastData, analysisResult);
                 return; // Success — done
             } catch (error) {
@@ -1352,7 +1371,7 @@ class BaseballBot {
     }
 
     startMonitoring() {
-        cron.schedule('*/5 * * * *', async () => {
+        cron.schedule('*/4 * * * *', async () => {
             try {
                 await this.checkForNewHomeRuns();
             } catch (error) {
@@ -1361,7 +1380,7 @@ class BaseballBot {
         });
         
         this.log('Started monitoring for home runs from your selected star players!');
-        this.log('Checking every 5 minutes year-round so Opening Day and late-season games are not missed');
+        this.log('Checking every 4 minutes year-round so Opening Day and late-season games are not missed');
     }
 
     async handleCommand(message) {
@@ -1416,6 +1435,12 @@ class BaseballBot {
 
         if (command === '!hrstats') {
             await this.sendAllHomeRunStats(message);
+            return;
+        }
+
+        if (command === '!parkstats') {
+            const playerName = args.join(' ') || null;
+            await this.sendParksBreakdown(message, playerName);
             return;
         }
 
@@ -2396,6 +2421,94 @@ class BaseballBot {
         }
     }
 
+    getParksBreakdown(homeRunParks) {
+        const counts = { noDoubter: 0, tier24: 0, tier18: 0, tier12: 0, tier6: 0 };
+        const values = Object.values(homeRunParks);
+
+        for (const parksCleared of values) {
+            if (parksCleared === 30) {
+                counts.noDoubter++;
+            } else if (parksCleared >= 24) {
+                counts.tier24++;
+            } else if (parksCleared >= 18) {
+                counts.tier18++;
+            } else if (parksCleared >= 12) {
+                counts.tier12++;
+            } else {
+                counts.tier6++;
+            }
+        }
+
+        return { total: values.length, counts };
+    }
+
+    formatParksBreakdown(playerName, breakdown) {
+        const { total, counts } = breakdown;
+        if (total === 0) {
+            return `**${playerName}** — no parks data yet`;
+        }
+
+        const lines = [
+            `**${playerName}** — ${total} HR with parks data`,
+            `30/30 No Doubters: **${counts.noDoubter}**`,
+            `24+/30 parks: **${counts.tier24}**`,
+            `18+/30 parks: **${counts.tier18}**`,
+            `12+/30 parks: **${counts.tier12}**`,
+            `6 or fewer: **${counts.tier6}**`
+        ];
+
+        return lines.join('\n');
+    }
+
+    async sendParksBreakdown(message, playerName = null) {
+        try {
+            if (playerName) {
+                const playerId = this.findPlayerIdByName(playerName);
+                if (!playerId) {
+                    await message.reply(`Could not find a tracked player matching "${playerName}".`);
+                    return;
+                }
+
+                const playerData = this.players[playerId];
+                const breakdown = this.getParksBreakdown(playerData.homeRunParks || {});
+                const text = this.formatParksBreakdown(playerData.name, breakdown);
+
+                const embed = new Discord.EmbedBuilder()
+                    .setTitle(`${playerData.name} — ${this.currentSeason} Parks Breakdown`)
+                    .setDescription(text)
+                    .setColor('#132448')
+                    .setTimestamp();
+
+                const thumbnail = this.getPlayerHeadshotUrlById(playerId);
+                if (thumbnail) {
+                    embed.setThumbnail(thumbnail);
+                }
+
+                await message.reply({ embeds: [embed] });
+                return;
+            }
+
+            // All players
+            const sections = [];
+            for (const [playerId, playerData] of Object.entries(this.players)) {
+                const breakdown = this.getParksBreakdown(playerData.homeRunParks || {});
+                sections.push(this.formatParksBreakdown(playerData.name, breakdown));
+            }
+
+            const embed = new Discord.EmbedBuilder()
+                .setTitle(`${this.currentSeason} Parks Breakdown — All Players`)
+                .setDescription(sections.join('\n\n'))
+                .setColor('#132448')
+                .setTimestamp()
+                .setFooter({ text: 'Based on Statcast data and ballpark analysis' });
+
+            await message.reply({ embeds: [embed] });
+        } catch (error) {
+            console.error('Error in sendParksBreakdown:', error);
+            await message.reply('Had trouble pulling parks breakdown data.');
+        }
+    }
+
     async sendPlayerStats(playerId, message) {
         try {
             const stats = await this.getPlayerStats(playerId);
@@ -2451,8 +2564,8 @@ class BaseballBot {
             .setDescription(`Currently monitoring these players for home runs:\n\n${playerList}`)
             .addFields(
                 { name: 'Player Commands', value: '!judge, !jazz, !soto, !ohtani, !schwarber, !harper, !gunnar', inline: false },
-                { name: 'General Commands', value: '!hrstats, !testhr, !players', inline: false },
-                { name: 'Admin Commands', value: '!debug, !forcecheck, !reset [player], !testdetails [player], !testrbi [player], !testdistance [player], !debuggame [gameId] [player], !testgame [gameId] [player], !findrecent, !teststatcast', inline: false },
+                { name: 'General Commands', value: '!hrstats, !parkstats, !players', inline: false },
+                { name: 'Admin Commands', value: '!forcecheck, !testhr, !reset [player], !debug', inline: false },
                 { name: 'Alert Channels', value: `Sending to ${this.channelIds.length} channel(s)`, inline: false }
             )
             .setColor('#132448')
