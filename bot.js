@@ -28,7 +28,8 @@ class BaseballBot {
             '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '656941': { name: 'Kyle Schwarber', team: 'PHI', number: '12', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '547180': { name: 'Bryce Harper', team: 'PHI', number: '3', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
-            '683002': { name: 'Gunnar Henderson', team: 'BAL', number: '2', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} }
+            '683002': { name: 'Gunnar Henderson', team: 'BAL', number: '2', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '545361': { name: 'Mike Trout', team: 'LAA', number: '27', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} }
         };
 
         this.statePath = options.statePath || path.join(__dirname, 'data', 'bot_state.json');
@@ -1432,6 +1433,11 @@ class BaseballBot {
             return;
         }
 
+        if (command === '!trout') {
+            await this.sendPlayerStats('545361', message);
+            return;
+        }
+
         if (command === '!players') {
             await this.sendTrackedPlayers(message);
             return;
@@ -2567,7 +2573,7 @@ class BaseballBot {
             .setTitle('📊 Tracked Players')
             .setDescription(`Currently monitoring these players for home runs:\n\n${playerList}`)
             .addFields(
-                { name: 'Player Commands', value: '!judge, !jazz, !soto, !ohtani, !schwarber, !harper, !gunnar', inline: false },
+                { name: 'Player Commands', value: '!judge, !jazz, !soto, !ohtani, !schwarber, !harper, !gunnar, !trout', inline: false },
                 { name: 'General Commands', value: '!hrstats, !parkstats, !players', inline: false },
                 { name: 'Admin Commands', value: '!forcecheck, !testhr, !reset [player], !debug', inline: false },
                 { name: 'Alert Channels', value: `Sending to ${this.channelIds.length} channel(s)`, inline: false }
