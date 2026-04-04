@@ -26,7 +26,11 @@
       "Bash(git remote add origin https://github.com/J-Thomp/home-run-bot.git)",
       "Bash(git push --force origin main)",
       "Bash(git remote remove origin)",
-      "Bash(git remote add origin https://github.com/joe-thomp/home-run-bot.git)"
+      "Bash(git remote add origin https://github.com/joe-thomp/home-run-bot.git)",
+      "Bash(git add bot.js README.md)",
+      "Bash(git commit:*)",
+      "Bash(git push origin main)",
+      "Bash(git add bot.js)"
     ]
   }
 }

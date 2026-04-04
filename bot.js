@@ -126,6 +126,7 @@ class BaseballBot {
             distance: 'Distance not available',
             rbi: 1,
             rbiDescription: 'Solo HR',
+            detailStatus: 'confirmed',
             gameId: null,
             gameDate: null,
             eventKey: null,
@@ -137,8 +138,53 @@ class BaseballBot {
 
     createFallbackHomeRunDetails(count, playerId) {
         return Array.from({ length: count }, (_, index) => this.createHomeRunDetail({
+            detailStatus: 'fallback',
             eventKey: `${playerId}_${this.currentSeason}_fallback_${index + 1}`
         }));
+    }
+
+    isFallbackHomeRunDetail(hrDetail) {
+        if (!hrDetail) {
+            return true;
+        }
+
+        return hrDetail.detailStatus === 'fallback' ||
+            (!hrDetail.gameId && String(hrDetail.eventKey || '').includes('_fallback_'));
+    }
+
+    sortHomeRunDetailsChronologically(details) {
+        return (Array.isArray(details) ? details : [])
+            .map((detail, index) => ({ detail, index }))
+            .sort((left, right) => {
+                const leftDate = left.detail?.gameDate ? new Date(left.detail.gameDate).getTime() : Number.MAX_SAFE_INTEGER;
+                const rightDate = right.detail?.gameDate ? new Date(right.detail.gameDate).getTime() : Number.MAX_SAFE_INTEGER;
+                if (leftDate !== rightDate) {
+                    return leftDate - rightDate;
+                }
+
+                const leftGameId = Number.parseInt(left.detail?.gameId, 10);
+                const rightGameId = Number.parseInt(right.detail?.gameId, 10);
+                const safeLeftGameId = Number.isFinite(leftGameId) ? leftGameId : Number.MAX_SAFE_INTEGER;
+                const safeRightGameId = Number.isFinite(rightGameId) ? rightGameId : Number.MAX_SAFE_INTEGER;
+                if (safeLeftGameId !== safeRightGameId) {
+                    return safeLeftGameId - safeRightGameId;
+                }
+
+                const leftAtBatIndex = Number.isInteger(left.detail?.atBatIndex) ? left.detail.atBatIndex : Number.MAX_SAFE_INTEGER;
+                const rightAtBatIndex = Number.isInteger(right.detail?.atBatIndex) ? right.detail.atBatIndex : Number.MAX_SAFE_INTEGER;
+                if (leftAtBatIndex !== rightAtBatIndex) {
+                    return leftAtBatIndex - rightAtBatIndex;
+                }
+
+                const leftGameHomeRunIndex = Number.isInteger(left.detail?.gameHomeRunIndex) ? left.detail.gameHomeRunIndex : Number.MAX_SAFE_INTEGER;
+                const rightGameHomeRunIndex = Number.isInteger(right.detail?.gameHomeRunIndex) ? right.detail.gameHomeRunIndex : Number.MAX_SAFE_INTEGER;
+                if (leftGameHomeRunIndex !== rightGameHomeRunIndex) {
+                    return leftGameHomeRunIndex - rightGameHomeRunIndex;
+                }
+
+                return left.index - right.index;
+            })
+            .map(item => item.detail);
     }
 
     buildHomeRunId(hrDetail) {
@@ -365,6 +411,7 @@ class BaseballBot {
                                 distance: 'Not yet available',
                                 rbi: 'unknown',
                                 rbiDescription: 'HR (details pending)',
+                                detailStatus: 'pending',
                                 gameId,
                                 gameDate: game.date,
                                 gameHomeRunIndex,
@@ -380,6 +427,7 @@ class BaseballBot {
                                 distance: 'Not yet available',
                                 rbi: 'unknown',
                                 rbiDescription: 'HR (details pending)',
+                                detailStatus: 'pending',
                                 gameId,
                                 gameDate: game.date,
                                 gameHomeRunIndex,
@@ -411,6 +459,7 @@ class BaseballBot {
                             distance: 'Not yet available',
                             rbi: 'unknown',
                             rbiDescription: 'HR (details pending)',
+                            detailStatus: 'pending',
                             gameId,
                             gameDate: game.date,
                             gameHomeRunIndex,
@@ -422,7 +471,9 @@ class BaseballBot {
             }
             
             // Return list of details for the new home runs
-            return detailsList.length > 0 ? detailsList : this.createFallbackHomeRunDetails(1, playerId);
+            return detailsList.length > 0
+                ? this.sortHomeRunDetailsChronologically(detailsList)
+                : this.createFallbackHomeRunDetails(newHomeRunCount, playerId);
         } catch (error) {
             this.log(`Error fetching home run details: ${error.message}`);
             return this.createFallbackHomeRunDetails(newHomeRunCount, playerId);
@@ -715,10 +766,13 @@ class BaseballBot {
                 
                 if (currentHomeRuns > playerData.lastCheckedHR) {
                     const newHomeRuns = currentHomeRuns - playerData.lastCheckedHR;
+                    const previousTrackedTotal = playerData.lastCheckedHR;
                     this.log(`🚨 NEW HOME RUN DETECTED! ${playerData.name} went from ${playerData.lastCheckedHR} to ${currentHomeRuns} (+${newHomeRuns})`);
                     
                     // Get ALL home run details for the season
-                    let allHomeRunDetails = await this.getRecentHomeRunDetails(playerId, currentHomeRuns);
+                    const allHomeRunDetails = this.sortHomeRunDetailsChronologically(
+                        await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
+                    );
                     
                     // Filter out home runs we've already sent alerts for
                     const unseenHomeRuns = [];
@@ -727,32 +781,49 @@ class BaseballBot {
                         
                         // Check if we've already sent this home run
                         if (!playerData.sentHomeRuns.has(hrId)) {
-                            unseenHomeRuns.push(hrDetail);
-                            playerData.sentHomeRuns.add(hrId);
+                            unseenHomeRuns.push({ hrDetail, hrId });
                         }
                     }
                     
-                    this.log(`Found ${unseenHomeRuns.length} new home runs out of ${allHomeRunDetails.length} total for ${playerData.name}`);
+                    const dispatchableHomeRuns = unseenHomeRuns.filter(({ hrDetail }) => !this.isFallbackHomeRunDetail(hrDetail));
+                    const fallbackHomeRunCount = unseenHomeRuns.length - dispatchableHomeRuns.length;
+
+                    this.log(`Found ${dispatchableHomeRuns.length} dispatchable new home runs out of ${allHomeRunDetails.length} total for ${playerData.name}`);
+                    if (fallbackHomeRunCount > 0) {
+                        this.log(`${playerData.name}: ${fallbackHomeRunCount} home run(s) are still missing game context; leaving them pending for the next check`);
+                    }
                     
                     // If details pending, log for potential retry
-                    if (unseenHomeRuns.some(d => d.rbi === 'unknown')) {
+                    if (dispatchableHomeRuns.some(({ hrDetail }) => hrDetail.rbi === 'unknown')) {
                         this.log(`Details pending for ${playerData.name} - will retry on next check`);
                     }
                     
-                    // Send an alert for each NEW home run only
-                    let hrNumber = playerData.lastCheckedHR;
-                    for (const hrDetail of unseenHomeRuns) {
+                    // Send the reliable initial alert immediately, then schedule the richer follow-up separately.
+                    let hrNumber = previousTrackedTotal;
+                    let confirmedAlerts = 0;
+                    for (const { hrDetail, hrId } of dispatchableHomeRuns) {
                         hrNumber++;
-                        if (hrDetail.gameId) {
-                            this.scheduleCombinedAlert(playerId, playerData, hrNumber, hrDetail)
-                                .catch(err => this.log(`Combined alert error for ${playerData.name}: ${err.message}`));
-                        } else {
-                            await this.sendHomeRunAlert(playerId, playerData, hrNumber, 1, hrDetail);
+                        const alertSent = await this.sendHomeRunAlert(playerId, playerData, hrNumber, 1, hrDetail);
+                        if (!alertSent) {
+                            this.log(`Initial alert failed for ${playerData.name}; leaving HR ${hrId} unsent so it can retry`);
+                            hrNumber--;
+                            continue;
                         }
+
+                        playerData.sentHomeRuns.add(hrId);
+                        confirmedAlerts++;
                         alertsSent++;
+
+                        if (hrDetail.gameId) {
+                            this.scheduleEnhancedFollowUp(playerId, playerData, hrNumber, hrDetail)
+                                .catch(err => this.log(`Enhanced follow-up error for ${playerData.name}: ${err.message}`));
+                        }
                     }
                     
-                    this.players[playerId].lastCheckedHR = currentHomeRuns;
+                    this.players[playerId].lastCheckedHR = Math.min(currentHomeRuns, previousTrackedTotal + confirmedAlerts);
+                    if (confirmedAlerts < newHomeRuns) {
+                        this.log(`${playerData.name}: only confirmed ${confirmedAlerts}/${newHomeRuns} new home run(s); keeping tracker at ${this.players[playerId].lastCheckedHR} so the rest can retry`);
+                    }
                     this.saveState();
                 }
             } catch (error) {
@@ -922,7 +993,13 @@ class BaseballBot {
     }
 
     buildCompactStatcastFields(statcastData, analysisResult, wallHeight, wallDist, totalDongs, pitcherDisplay) {
+        const statcastDistance = Number.isFinite(Number(statcastData.hit_distance_sc))
+            ? `${Math.round(Number(statcastData.hit_distance_sc))} ft`
+            : 'N/A';
+
         return [
+            { name: 'Type', value: statcastData.rbi_description || 'HR', inline: true },
+            { name: 'Distance', value: statcastDistance, inline: true },
             { name: 'Exit Velocity', value: `${statcastData.launch_speed.toFixed(1)} mph`, inline: true },
             { name: 'Launch Angle', value: `${statcastData.launch_angle.toFixed(0)}\u00b0`, inline: true },
             { name: 'Spray Direction', value: analysisResult.spray_direction, inline: true },
@@ -953,7 +1030,7 @@ class BaseballBot {
 
             const deliveredCount = await this.sendToConfiguredChannels(basicMessageOptions, 'alert');
             this.log(`Alert summary: ${deliveredCount}/${this.channelIds.length} channels notified for ${playerData.name} (Total: ${totalHomeRuns} HR, Distance: ${alertPresentation.primaryDetails.distance})`);
-            return;
+            return deliveredCount > 0;
         }
         
         // Handle both single object and array of details
@@ -1069,6 +1146,7 @@ class BaseballBot {
                 return null;
             }
 
+            const rbiInfo = this.extractRBIInfo(selectedPlay);
             pitcherName = selectedPlay.matchup?.pitcher?.fullName || 'Unknown';
             for (const evt of (selectedPlay.playEvents || [])) {
                 if (evt.hitData) {
@@ -1106,7 +1184,9 @@ class BaseballBot {
                 plate_z: plateZ,
                 home_team: homeTeam,
                 pitcher_name: pitcherName,
-                pitcher_team: pitcherTeam
+                pitcher_team: pitcherTeam,
+                rbi: rbiInfo.rbi,
+                rbi_description: rbiInfo.rbiDescription
             };
         } catch (error) {
             this.log(`Error fetching Statcast data from playByPlay: ${error.message}`);
