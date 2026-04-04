@@ -31,6 +31,9 @@ class BaseballBot {
             '683002': { name: 'Gunnar Henderson', team: 'BAL', number: '2', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '545361': { name: 'Mike Trout', team: 'LAA', number: '27', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} }
         };
+        for (const playerData of Object.values(this.players)) {
+            playerData.sentHomeRunsByChannel = {};
+        }
 
         this.statePath = options.statePath || path.join(__dirname, 'data', 'bot_state.json');
         this.botUsername = options.botUsername || null;
@@ -38,6 +41,7 @@ class BaseballBot {
 
         this.debugging = true;
         this.lastCheckTime = null;
+        this.checkInProgress = null;
     }
 
     getPlayerHeadshotUrl(playerName) {
@@ -81,9 +85,16 @@ class BaseballBot {
                 }
 
                 this.players[playerId].lastCheckedHR = Number(savedState.lastCheckedHR) || 0;
-                this.players[playerId].sentHomeRuns = new Set(
-                    Array.isArray(savedState.sentHomeRuns) ? savedState.sentHomeRuns : []
-                );
+                const legacySentHomeRuns = Array.isArray(savedState.sentHomeRuns) ? savedState.sentHomeRuns : [];
+                this.players[playerId].sentHomeRuns = new Set(legacySentHomeRuns);
+                this.players[playerId].sentHomeRunsByChannel = {};
+                for (const channelId of this.channelIds) {
+                    const perChannelSentHomeRuns = Array.isArray(savedState.sentHomeRunsByChannel?.[channelId])
+                        ? savedState.sentHomeRunsByChannel[channelId]
+                        : legacySentHomeRuns;
+                    this.players[playerId].sentHomeRunsByChannel[channelId] = new Set(perChannelSentHomeRuns);
+                }
+                this.rebuildSentHomeRuns(this.players[playerId]);
                 this.players[playerId].homeRunParks = savedState.homeRunParks || {};
                 restoredPlayers.add(playerId);
             }
@@ -104,9 +115,17 @@ class BaseballBot {
 
             const serializedPlayers = {};
             for (const [playerId, playerData] of Object.entries(this.players)) {
+                this.ensurePlayerDeliveryState(playerData);
+                this.rebuildSentHomeRuns(playerData);
+                const serializedPerChannelState = {};
+                for (const channelId of this.channelIds) {
+                    serializedPerChannelState[channelId] = Array.from(playerData.sentHomeRunsByChannel[channelId]);
+                }
+
                 serializedPlayers[playerId] = {
                     lastCheckedHR: playerData.lastCheckedHR,
                     sentHomeRuns: Array.from(playerData.sentHomeRuns),
+                    sentHomeRunsByChannel: serializedPerChannelState,
                     homeRunParks: playerData.homeRunParks || {}
                 };
             }
@@ -119,6 +138,90 @@ class BaseballBot {
         } catch (error) {
             this.log(`Could not save state file: ${error.message}`);
         }
+    }
+
+    ensurePlayerDeliveryState(playerData) {
+        if (!(playerData.sentHomeRuns instanceof Set)) {
+            playerData.sentHomeRuns = new Set(Array.isArray(playerData.sentHomeRuns) ? playerData.sentHomeRuns : []);
+        }
+
+        if (!playerData.sentHomeRunsByChannel || typeof playerData.sentHomeRunsByChannel !== 'object') {
+            playerData.sentHomeRunsByChannel = {};
+        }
+
+        for (const channelId of this.channelIds) {
+            if (!(playerData.sentHomeRunsByChannel[channelId] instanceof Set)) {
+                const existingIds = Array.isArray(playerData.sentHomeRunsByChannel[channelId])
+                    ? playerData.sentHomeRunsByChannel[channelId]
+                    : Array.from(playerData.sentHomeRuns);
+                playerData.sentHomeRunsByChannel[channelId] = new Set(existingIds);
+            }
+        }
+    }
+
+    rebuildSentHomeRuns(playerData) {
+        this.ensurePlayerDeliveryState(playerData);
+        const fullySentHomeRuns = new Set();
+        const candidateIds = new Set();
+
+        for (const channelId of this.channelIds) {
+            for (const hrId of playerData.sentHomeRunsByChannel[channelId]) {
+                candidateIds.add(hrId);
+            }
+        }
+
+        for (const hrId of candidateIds) {
+            if (this.channelIds.every(channelId => playerData.sentHomeRunsByChannel[channelId].has(hrId))) {
+                fullySentHomeRuns.add(hrId);
+            }
+        }
+
+        playerData.sentHomeRuns = fullySentHomeRuns;
+        return fullySentHomeRuns;
+    }
+
+    getPendingChannelIdsForHomeRun(playerData, hrId) {
+        this.ensurePlayerDeliveryState(playerData);
+        return this.channelIds.filter(channelId => !playerData.sentHomeRunsByChannel[channelId].has(hrId));
+    }
+
+    markHomeRunSentToChannels(playerData, hrId, channelIds) {
+        if (!Array.isArray(channelIds) || channelIds.length === 0) {
+            return;
+        }
+
+        this.ensurePlayerDeliveryState(playerData);
+        for (const channelId of channelIds) {
+            if (!playerData.sentHomeRunsByChannel[channelId]) {
+                playerData.sentHomeRunsByChannel[channelId] = new Set();
+            }
+            playerData.sentHomeRunsByChannel[channelId].add(hrId);
+        }
+
+        this.rebuildSentHomeRuns(playerData);
+    }
+
+    isHomeRunFullySent(playerData, hrId) {
+        this.ensurePlayerDeliveryState(playerData);
+        return this.channelIds.every(channelId => playerData.sentHomeRunsByChannel[channelId].has(hrId));
+    }
+
+    countContiguousDeliveredHomeRuns(playerData, homeRunDetails) {
+        let deliveredCount = 0;
+        for (const hrDetail of homeRunDetails) {
+            if (this.isFallbackHomeRunDetail(hrDetail)) {
+                break;
+            }
+
+            const hrId = this.buildHomeRunId(hrDetail);
+            if (!this.isHomeRunFullySent(playerData, hrId)) {
+                break;
+            }
+
+            deliveredCount++;
+        }
+
+        return deliveredCount;
     }
 
     createHomeRunDetail(overrides = {}) {
@@ -753,87 +856,113 @@ class BaseballBot {
     }
 
     async checkForNewHomeRuns() {
-        this.lastCheckTime = new Date();
-        this.log(`Starting home run check at ${this.lastCheckTime.toISOString()}`);
-        
-        let alertsSent = 0;
-        
-        for (const [playerId, playerData] of Object.entries(this.players)) {
-            try {
-                const currentHomeRuns = await this.getPlayerHomeRuns(playerId);
-                
-                this.log(`${playerData.name}: Current=${currentHomeRuns}, Last=${playerData.lastCheckedHR}`);
-                
-                if (currentHomeRuns > playerData.lastCheckedHR) {
-                    const newHomeRuns = currentHomeRuns - playerData.lastCheckedHR;
-                    const previousTrackedTotal = playerData.lastCheckedHR;
-                    this.log(`🚨 NEW HOME RUN DETECTED! ${playerData.name} went from ${playerData.lastCheckedHR} to ${currentHomeRuns} (+${newHomeRuns})`);
-                    
-                    // Get ALL home run details for the season
-                    const allHomeRunDetails = this.sortHomeRunDetailsChronologically(
-                        await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
-                    );
-                    
-                    // Filter out home runs we've already sent alerts for
-                    const unseenHomeRuns = [];
-                    for (const hrDetail of allHomeRunDetails) {
-                        const hrId = this.buildHomeRunId(hrDetail);
-                        
-                        // Check if we've already sent this home run
-                        if (!playerData.sentHomeRuns.has(hrId)) {
-                            unseenHomeRuns.push({ hrDetail, hrId });
-                        }
-                    }
-                    
-                    const dispatchableHomeRuns = unseenHomeRuns.filter(({ hrDetail }) => !this.isFallbackHomeRunDetail(hrDetail));
-                    const fallbackHomeRunCount = unseenHomeRuns.length - dispatchableHomeRuns.length;
-
-                    this.log(`Found ${dispatchableHomeRuns.length} dispatchable new home runs out of ${allHomeRunDetails.length} total for ${playerData.name}`);
-                    if (fallbackHomeRunCount > 0) {
-                        this.log(`${playerData.name}: ${fallbackHomeRunCount} home run(s) are still missing game context; leaving them pending for the next check`);
-                    }
-                    
-                    // If details pending, log for potential retry
-                    if (dispatchableHomeRuns.some(({ hrDetail }) => hrDetail.rbi === 'unknown')) {
-                        this.log(`Details pending for ${playerData.name} - will retry on next check`);
-                    }
-                    
-                    // Send the reliable initial alert immediately, then schedule the richer follow-up separately.
-                    let hrNumber = previousTrackedTotal;
-                    let confirmedAlerts = 0;
-                    for (const { hrDetail, hrId } of dispatchableHomeRuns) {
-                        hrNumber++;
-                        const alertSent = await this.sendHomeRunAlert(playerId, playerData, hrNumber, 1, hrDetail);
-                        if (!alertSent) {
-                            this.log(`Initial alert failed for ${playerData.name}; leaving HR ${hrId} unsent so it can retry`);
-                            hrNumber--;
-                            continue;
-                        }
-
-                        playerData.sentHomeRuns.add(hrId);
-                        confirmedAlerts++;
-                        alertsSent++;
-
-                        if (hrDetail.gameId) {
-                            this.scheduleEnhancedFollowUp(playerId, playerData, hrNumber, hrDetail)
-                                .catch(err => this.log(`Enhanced follow-up error for ${playerData.name}: ${err.message}`));
-                        }
-                    }
-                    
-                    this.players[playerId].lastCheckedHR = Math.min(currentHomeRuns, previousTrackedTotal + confirmedAlerts);
-                    if (confirmedAlerts < newHomeRuns) {
-                        this.log(`${playerData.name}: only confirmed ${confirmedAlerts}/${newHomeRuns} new home run(s); keeping tracker at ${this.players[playerId].lastCheckedHR} so the rest can retry`);
-                    }
-                    this.saveState();
-                }
-            } catch (error) {
-                this.log(`Error checking ${playerData.name}: ${error.message}`);
-                console.error(`Full error for ${playerData.name}:`, error);
-            }
+        if (this.checkInProgress) {
+            this.log('Home run check already in progress; reusing the active run');
+            return this.checkInProgress;
         }
-        
-        this.saveState();
-        this.log(`Home run check completed. Alerts sent: ${alertsSent}`);
+
+        this.checkInProgress = (async () => {
+            this.lastCheckTime = new Date();
+            this.log(`Starting home run check at ${this.lastCheckTime.toISOString()}`);
+            
+            let alertsSent = 0;
+            
+            for (const [playerId, playerData] of Object.entries(this.players)) {
+                try {
+                    this.ensurePlayerDeliveryState(playerData);
+                    const currentHomeRuns = await this.getPlayerHomeRuns(playerId);
+                    
+                    this.log(`${playerData.name}: Current=${currentHomeRuns}, Last=${playerData.lastCheckedHR}`);
+                    
+                    if (currentHomeRuns > playerData.lastCheckedHR) {
+                        const newHomeRuns = currentHomeRuns - playerData.lastCheckedHR;
+                        this.log(`🚨 NEW HOME RUN DETECTED! ${playerData.name} went from ${playerData.lastCheckedHR} to ${currentHomeRuns} (+${newHomeRuns})`);
+                        
+                        const allHomeRunDetails = this.sortHomeRunDetailsChronologically(
+                            await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
+                        );
+                        
+                        const unseenHomeRuns = [];
+                        for (let index = 0; index < allHomeRunDetails.length; index++) {
+                            const hrDetail = allHomeRunDetails[index];
+                            const hrId = this.buildHomeRunId(hrDetail);
+                            const pendingChannelIds = this.getPendingChannelIdsForHomeRun(playerData, hrId);
+                            if (pendingChannelIds.length > 0) {
+                                unseenHomeRuns.push({
+                                    hrDetail,
+                                    hrId,
+                                    pendingChannelIds,
+                                    totalHomeRuns: index + 1
+                                });
+                            }
+                        }
+                        
+                        const dispatchableHomeRuns = unseenHomeRuns.filter(({ hrDetail }) => !this.isFallbackHomeRunDetail(hrDetail));
+                        const fallbackHomeRunCount = unseenHomeRuns.length - dispatchableHomeRuns.length;
+
+                        this.log(`Found ${dispatchableHomeRuns.length} dispatchable new home runs out of ${allHomeRunDetails.length} total for ${playerData.name}`);
+                        if (fallbackHomeRunCount > 0) {
+                            this.log(`${playerData.name}: ${fallbackHomeRunCount} home run(s) are still missing game context; leaving them pending for the next check`);
+                        }
+                        
+                        if (dispatchableHomeRuns.some(({ hrDetail }) => hrDetail.rbi === 'unknown')) {
+                            this.log(`Details pending for ${playerData.name} - will retry on next check`);
+                        }
+                        
+                        for (const { hrDetail, hrId, pendingChannelIds, totalHomeRuns } of dispatchableHomeRuns) {
+                            const deliveryResult = await this.sendHomeRunAlert(
+                                playerId,
+                                playerData,
+                                totalHomeRuns,
+                                1,
+                                hrDetail,
+                                { targetChannelIds: pendingChannelIds }
+                            );
+
+                            if (deliveryResult.successChannelIds.length === 0) {
+                                this.log(`Initial alert failed for ${playerData.name}; leaving HR ${hrId} pending for channels ${pendingChannelIds.join(', ')}`);
+                                continue;
+                            }
+
+                            this.markHomeRunSentToChannels(playerData, hrId, deliveryResult.successChannelIds);
+                            alertsSent++;
+
+                            const isNowFullySent = this.isHomeRunFullySent(playerData, hrId);
+                            if (!isNowFullySent) {
+                                this.log(`${playerData.name}: HR ${hrId} still pending for channels ${deliveryResult.failedChannelIds.join(', ')}`);
+                                continue;
+                            }
+
+                            if (hrDetail.gameId) {
+                                this.scheduleEnhancedFollowUp(playerId, playerData, totalHomeRuns, hrDetail)
+                                    .catch(err => this.log(`Enhanced follow-up error for ${playerData.name}: ${err.message}`));
+                            }
+                        }
+                        
+                        this.players[playerId].lastCheckedHR = Math.min(
+                            currentHomeRuns,
+                            this.countContiguousDeliveredHomeRuns(playerData, allHomeRunDetails)
+                        );
+                        if (this.players[playerId].lastCheckedHR < currentHomeRuns) {
+                            this.log(`${playerData.name}: only fully delivered ${this.players[playerId].lastCheckedHR}/${currentHomeRuns} tracked home run(s); leaving the remainder pending for retry`);
+                        }
+                        this.saveState();
+                    }
+                } catch (error) {
+                    this.log(`Error checking ${playerData.name}: ${error.message}`);
+                    console.error(`Full error for ${playerData.name}:`, error);
+                }
+            }
+            
+            this.saveState();
+            this.log(`Home run check completed. Alerts sent: ${alertsSent}`);
+        })();
+
+        try {
+            await this.checkInProgress;
+        } finally {
+            this.checkInProgress = null;
+        }
     }
 
     buildInitialAlertFields(playerData, totalHomeRuns, hrType, distance) {
@@ -961,21 +1090,23 @@ class BaseballBot {
         return messageOptions;
     }
 
-    async sendToConfiguredChannels(messageOptions, logLabel) {
-        let successCount = 0;
-        for (const channelId of this.channelIds) {
+    async sendToConfiguredChannels(messageOptions, logLabel, targetChannelIds = this.channelIds) {
+        const successChannelIds = [];
+        const failedChannelIds = [];
+        for (const channelId of targetChannelIds) {
             try {
                 const channel = await this.client.channels.fetch(channelId);
                 await channel.send(messageOptions);
                 this.log(`Sent ${logLabel} to channel ${channelId}`);
-                successCount++;
+                successChannelIds.push(channelId);
             } catch (error) {
                 this.log(`Error sending ${logLabel} to channel ${channelId}: ${error.message}`);
                 console.error(`Full error for channel ${channelId}:`, error);
+                failedChannelIds.push(channelId);
             }
         }
 
-        return successCount;
+        return { successChannelIds, failedChannelIds };
     }
 
     cleanupAnalysisImage(imagePath) {
@@ -1011,15 +1142,18 @@ class BaseballBot {
         ];
     }
 
-    async sendHomeRunAlert(playerIdOrPlayerData, playerDataOrTotalHomeRuns, totalHomeRunsOrNewCount, newCountOrDetails, maybeDetails) {
+    async sendHomeRunAlert(playerIdOrPlayerData, playerDataOrTotalHomeRuns, totalHomeRunsOrNewCount, newCountOrDetails, maybeDetails, options = {}) {
         const hasExplicitPlayerId = typeof playerIdOrPlayerData === 'string' || typeof playerIdOrPlayerData === 'number';
         const playerId = hasExplicitPlayerId ? String(playerIdOrPlayerData) : Object.keys(this.players).find(id => this.players[id].name === playerIdOrPlayerData?.name);
         const playerData = hasExplicitPlayerId ? playerDataOrTotalHomeRuns : playerIdOrPlayerData;
         const totalHomeRuns = hasExplicitPlayerId ? totalHomeRunsOrNewCount : playerDataOrTotalHomeRuns;
         const details = hasExplicitPlayerId ? maybeDetails : newCountOrDetails;
+        const targetChannelIds = Array.isArray(options.targetChannelIds) && options.targetChannelIds.length > 0
+            ? options.targetChannelIds
+            : this.channelIds;
 
         {
-            this.log(`Sending home run alert for ${playerData.name} to ${this.channelIds.length} channel(s)...`);
+            this.log(`Sending home run alert for ${playerData.name} to ${targetChannelIds.length} channel(s)...`);
             const alertPresentation = this.getHomeRunAlertPresentation(playerData, details);
             const basicMessageOptions = this.buildAlertMessageOptions(
                 playerId,
@@ -1028,9 +1162,9 @@ class BaseballBot {
                 alertPresentation.primaryDetails
             );
 
-            const deliveredCount = await this.sendToConfiguredChannels(basicMessageOptions, 'alert');
-            this.log(`Alert summary: ${deliveredCount}/${this.channelIds.length} channels notified for ${playerData.name} (Total: ${totalHomeRuns} HR, Distance: ${alertPresentation.primaryDetails.distance})`);
-            return deliveredCount > 0;
+            const deliveryResult = await this.sendToConfiguredChannels(basicMessageOptions, 'alert', targetChannelIds);
+            this.log(`Alert summary: ${deliveryResult.successChannelIds.length}/${targetChannelIds.length} channels notified for ${playerData.name} (Total: ${totalHomeRuns} HR, Distance: ${alertPresentation.primaryDetails.distance})`);
+            return deliveryResult;
         }
         
         // Handle both single object and array of details
@@ -1264,8 +1398,8 @@ class BaseballBot {
             }
         );
 
-        const successCount = await this.sendToConfiguredChannels(messageOptions, 'combined alert');
-        this.log(`Combined alert sent to ${successCount}/${this.channelIds.length} channels for ${playerData.name}`);
+        const deliveryResult = await this.sendToConfiguredChannels(messageOptions, 'combined alert');
+        this.log(`Combined alert sent to ${deliveryResult.successChannelIds.length}/${this.channelIds.length} channels for ${playerData.name}`);
 
         // Store parks cleared count for this HR
         if (analysisResult && Number.isFinite(analysisResult.total_dongs)) {
@@ -1686,7 +1820,9 @@ class BaseballBot {
             
             const oldValue = this.players[playerId].lastCheckedHR;
             this.players[playerId].lastCheckedHR = 0;
-            this.players[playerId].sentHomeRuns.clear(); // Clear the sent home runs tracking
+            this.players[playerId].sentHomeRuns.clear();
+            this.players[playerId].sentHomeRunsByChannel = {};
+            this.ensurePlayerDeliveryState(this.players[playerId]);
             this.saveState();
             this.log(`Reset ${this.players[playerId].name} HR count from ${oldValue} to 0 and cleared sent home runs (manual reset)`);
             
