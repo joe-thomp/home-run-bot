@@ -42,6 +42,7 @@ class BaseballBot {
         this.debugging = true;
         this.lastCheckTime = null;
         this.checkInProgress = null;
+        this.pendingNotifications = new Set(); // hrIds currently waiting for Statcast before sending
     }
 
     getPlayerHeadshotUrl(playerName) {
@@ -882,12 +883,27 @@ class BaseballBot {
                             await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
                         );
                         
+                        const todayStr = new Date().toISOString().slice(0, 10);
+
                         const unseenHomeRuns = [];
                         for (let index = 0; index < allHomeRunDetails.length; index++) {
                             const hrDetail = allHomeRunDetails[index];
                             const hrId = this.buildHomeRunId(hrDetail);
+
+                            // Skip HRs already being processed by a pending notification
+                            if (this.pendingNotifications.has(hrId)) {
+                                continue;
+                            }
+
                             const pendingChannelIds = this.getPendingChannelIdsForHomeRun(playerData, hrId);
                             if (pendingChannelIds.length > 0) {
+                                // Skip HRs from games not played today to avoid replaying old HRs on state reset
+                                if (hrDetail.gameDate && hrDetail.gameDate !== todayStr) {
+                                    this.log(`${playerData.name}: Skipping old HR ${hrId} from ${hrDetail.gameDate} (not today); marking as sent`);
+                                    this.markHomeRunSentToChannels(playerData, hrId, pendingChannelIds);
+                                    continue;
+                                }
+
                                 unseenHomeRuns.push({
                                     hrDetail,
                                     hrId,
@@ -896,7 +912,7 @@ class BaseballBot {
                                 });
                             }
                         }
-                        
+
                         const dispatchableHomeRuns = unseenHomeRuns.filter(({ hrDetail }) => !this.isFallbackHomeRunDetail(hrDetail));
                         const fallbackHomeRunCount = unseenHomeRuns.length - dispatchableHomeRuns.length;
 
@@ -904,41 +920,23 @@ class BaseballBot {
                         if (fallbackHomeRunCount > 0) {
                             this.log(`${playerData.name}: ${fallbackHomeRunCount} home run(s) are still missing game context; leaving them pending for the next check`);
                         }
-                        
-                        if (dispatchableHomeRuns.some(({ hrDetail }) => hrDetail.rbi === 'unknown')) {
-                            this.log(`Details pending for ${playerData.name} - will retry on next check`);
-                        }
-                        
+
                         for (const { hrDetail, hrId, pendingChannelIds, totalHomeRuns } of dispatchableHomeRuns) {
-                            const deliveryResult = await this.sendHomeRunAlert(
-                                playerId,
-                                playerData,
-                                totalHomeRuns,
-                                1,
-                                hrDetail,
-                                { targetChannelIds: pendingChannelIds }
-                            );
+                            // Mark as pending so subsequent check cycles don't re-dispatch
+                            this.pendingNotifications.add(hrId);
 
-                            if (deliveryResult.successChannelIds.length === 0) {
-                                this.log(`Initial alert failed for ${playerData.name}; leaving HR ${hrId} pending for channels ${pendingChannelIds.join(', ')}`);
-                                continue;
-                            }
-
-                            this.markHomeRunSentToChannels(playerData, hrId, deliveryResult.successChannelIds);
-                            alertsSent++;
-
-                            const isNowFullySent = this.isHomeRunFullySent(playerData, hrId);
-                            if (!isNowFullySent) {
-                                this.log(`${playerData.name}: HR ${hrId} still pending for channels ${deliveryResult.failedChannelIds.join(', ')}`);
-                                continue;
-                            }
-
-                            if (hrDetail.gameId) {
-                                this.scheduleEnhancedFollowUp(playerId, playerData, totalHomeRuns, hrDetail)
-                                    .catch(err => this.log(`Enhanced follow-up error for ${playerData.name}: ${err.message}`));
-                            }
+                            // Fire off the wait-for-statcast-then-send flow (non-blocking)
+                            this.waitForStatcastAndSend(playerId, playerData, totalHomeRuns, hrDetail, hrId, pendingChannelIds)
+                                .then(sent => {
+                                    if (sent) alertsSent++;
+                                })
+                                .catch(err => this.log(`Notification error for ${playerData.name} HR ${hrId}: ${err.message}`))
+                                .finally(() => {
+                                    this.pendingNotifications.delete(hrId);
+                                    this.saveState();
+                                });
                         }
-                        
+
                         this.players[playerId].lastCheckedHR = Math.min(
                             currentHomeRuns,
                             this.countContiguousDeliveredHomeRuns(playerData, allHomeRunDetails)
@@ -977,11 +975,33 @@ class BaseballBot {
         ];
     }
 
-    buildCombinedFollowUpFields(totalDongs, pitcherDisplay) {
-        return [
-            { name: 'Parks Cleared', value: `${totalDongs}/30`, inline: true },
-            { name: 'Off Pitcher', value: pitcherDisplay || 'N/A', inline: true }
-        ];
+    buildCombinedFollowUpFields(totalDongs, pitcherDisplay, statcastData = null, analysisResult = null) {
+        const fields = [];
+
+        if (statcastData) {
+            if (statcastData.launch_speed) {
+                fields.push({ name: 'Exit Velocity', value: `${statcastData.launch_speed.toFixed(1)} mph`, inline: true });
+            }
+            if (statcastData.launch_angle != null) {
+                fields.push({ name: 'Launch Angle', value: `${Number(statcastData.launch_angle).toFixed(0)}\u00b0`, inline: true });
+            }
+            if (analysisResult?.spray_direction) {
+                fields.push({ name: 'Spray Direction', value: analysisResult.spray_direction, inline: true });
+            }
+        }
+
+        if (analysisResult) {
+            const homeParkDetail = analysisResult.park_details?.find(p => p.team === statcastData?.home_team);
+            if (homeParkDetail) {
+                fields.push({ name: 'Wall Height', value: `${homeParkDetail.fence_height} ft`, inline: true });
+                fields.push({ name: 'Wall Distance', value: `${Math.round(homeParkDetail.wall_distance)} ft`, inline: true });
+            }
+        }
+
+        fields.push({ name: 'Parks Cleared', value: `${totalDongs}/30`, inline: true });
+        fields.push({ name: 'Off Pitcher', value: pitcherDisplay || 'N/A', inline: true });
+
+        return fields;
     }
 
     getHomeRunAlertPresentation(playerData, details, statcastData = null) {
@@ -1065,8 +1085,19 @@ class BaseballBot {
 
             embed.addFields(this.buildCombinedFollowUpFields(
                 analysisResult.total_dongs,
-                pitcherDisplay
+                pitcherDisplay,
+                statcastData,
+                analysisResult
             ));
+
+            // List parks where it would NOT be a HR (if 10 or fewer)
+            if (analysisResult.parks_not_cleared?.length > 0 && analysisResult.parks_not_cleared.length <= 10) {
+                embed.addFields({
+                    name: `Not a HR in (${analysisResult.parks_not_cleared.length})`,
+                    value: analysisResult.parks_not_cleared.join(', '),
+                    inline: true
+                });
+            }
         }
 
         if (footerText) {
@@ -1142,107 +1173,7 @@ class BaseballBot {
         ];
     }
 
-    async sendHomeRunAlert(playerIdOrPlayerData, playerDataOrTotalHomeRuns, totalHomeRunsOrNewCount, newCountOrDetails, maybeDetails, options = {}) {
-        const hasExplicitPlayerId = typeof playerIdOrPlayerData === 'string' || typeof playerIdOrPlayerData === 'number';
-        const playerId = hasExplicitPlayerId ? String(playerIdOrPlayerData) : Object.keys(this.players).find(id => this.players[id].name === playerIdOrPlayerData?.name);
-        const playerData = hasExplicitPlayerId ? playerDataOrTotalHomeRuns : playerIdOrPlayerData;
-        const totalHomeRuns = hasExplicitPlayerId ? totalHomeRunsOrNewCount : playerDataOrTotalHomeRuns;
-        const details = hasExplicitPlayerId ? maybeDetails : newCountOrDetails;
-        const targetChannelIds = Array.isArray(options.targetChannelIds) && options.targetChannelIds.length > 0
-            ? options.targetChannelIds
-            : this.channelIds;
-
-        {
-            this.log(`Sending home run alert for ${playerData.name} to ${targetChannelIds.length} channel(s)...`);
-            const alertPresentation = this.getHomeRunAlertPresentation(playerData, details);
-            const basicMessageOptions = this.buildAlertMessageOptions(
-                playerId,
-                playerData,
-                totalHomeRuns,
-                alertPresentation.primaryDetails
-            );
-
-            const deliveryResult = await this.sendToConfiguredChannels(basicMessageOptions, 'alert', targetChannelIds);
-            this.log(`Alert summary: ${deliveryResult.successChannelIds.length}/${targetChannelIds.length} channels notified for ${playerData.name} (Total: ${totalHomeRuns} HR, Distance: ${alertPresentation.primaryDetails.distance})`);
-            return deliveryResult;
-        }
-        
-        // Handle both single object and array of details
-        const primaryDetails = Array.isArray(details) ? details : details;
-        
-        // Parse distance for nuke check
-        let isNuke = false;
-        if (primaryDetails.distance && primaryDetails.distance !== "Not yet available" && primaryDetails.distance !== "Distance not available") {
-            const match = primaryDetails.distance.match(/(\d+)/);
-            if (match) {
-                const distanceNum = parseInt(match[1]);
-                isNuke = distanceNum > 440;
-            }
-        }
-        
-        const hrType = primaryDetails.rbiDescription || 'Solo HR';
-        const titleText = hrType === 'Grand Slam!' ? 
-            `${playerData.name.toUpperCase()} GRAND SLAM!` :
-            `${playerData.name.toUpperCase()} ${hrType.toUpperCase().replace(' HR', ' HOME RUN')}!`;
-        
-        // Always use singular description
-        let description = `${playerData.name} just hit a home run!`;
-        if (isNuke) {
-            description = `${playerData.name} just hit a fucking NUKE!`;
-        }
-        
-        const embed = new Discord.EmbedBuilder()
-            .setTitle(titleText)
-            .setDescription(description)
-            .addFields(this.buildInitialAlertFields(
-                playerData,
-                totalHomeRuns,
-                hrType,
-                primaryDetails.distance
-            ))
-            .setColor('#132448')
-            .setTimestamp();
-
-        // Set footer if details pending
-        if (primaryDetails.rbi === 'unknown') {
-            embed.setFooter({ text: 'Details may update soon—check back!' });
-        }
-
-        // Set player headshot using MLB's official headshot URLs
-        const headshots = {
-            'Aaron Judge': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/592450/headshot/67/current',
-            'Jazz Chisholm Jr.': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665862/headshot/67/current',
-            'Juan Soto': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665742/headshot/67/current',
-            'Shohei Ohtani': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/660271/headshot/67/current',
-            'Kyle Schwarber': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/656941/headshot/67/current',
-            'Bryce Harper': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/547180/headshot/67/current',
-            'Gunnar Henderson': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/683002/headshot/67/current'
-        };
-        
-        const alertPlayerId = Object.keys(this.players).find(id => this.players[id].name === playerData.name);
-        const alertThumbnail = this.getPlayerHeadshotUrlById(alertPlayerId) || headshots[playerData.name];
-        if (alertThumbnail) {
-            embed.setThumbnail(alertThumbnail);
-        }
-
-        // Send to all configured channels
-        let successCount = 0;
-        for (const channelId of this.channelIds) {
-            try {
-                const channel = await this.client.channels.fetch(channelId);
-                await channel.send({ embeds: [embed] });
-                this.log(`✅ Successfully sent alert to channel ${channelId}`);
-                successCount++;
-            } catch (error) {
-                this.log(`❌ Error sending message to channel ${channelId}: ${error.message}`);
-                console.error(`Full error for channel ${channelId}:`, error);
-            }
-        }
-        
-        this.log(`📊 Alert summary: ${successCount}/${this.channelIds.length} channels notified for ${playerData.name} (Total: ${totalHomeRuns} HR, Distance: ${primaryDetails.distance})`);
-    }
-
-    // ── Enhanced Statcast Follow-Up Methods ────────────────────────────────
+    // ── Statcast Data Methods ────────────────────────────────
 
     async getStatcastDataForHR(playerId, hrDetail) {
         // Primary: use MLB playByPlay API (reliable)
@@ -1383,9 +1314,48 @@ class BaseballBot {
         });
     }
 
-    async sendCombinedHomeRunAlert(playerId, playerData, totalHRs, hrDetail, statcastData, analysisResult, footerText = null) {
-        this.log(`Sending combined home run alert for ${playerData.name}...`);
+    async waitForStatcastAndSend(playerId, playerData, totalHRs, hrDetail, hrId, pendingChannelIds) {
+        const POLL_INTERVAL = 30000;  // 30 seconds between attempts
+        const MAX_WAIT = 600000;      // 10 minutes total
+        const gameId = hrDetail?.gameId;
 
+        this.log(`Waiting for Statcast data before sending ${playerData.name} HR ${hrId} (up to 10 min)...`);
+
+        let statcastData = null;
+        let analysisResult = null;
+        const startTime = Date.now();
+
+        // Poll for Statcast data up to 10 minutes
+        while (Date.now() - startTime < MAX_WAIT) {
+            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+
+            if (!gameId) break;
+
+            try {
+                statcastData = await this.getStatcastDataForHR(playerId, hrDetail);
+                if (!statcastData) {
+                    this.log(`Statcast not yet available for ${playerData.name} HR ${hrId} (${Math.round((Date.now() - startTime) / 1000)}s elapsed)`);
+                    continue;
+                }
+
+                this.log(`Got Statcast for ${playerData.name}: EV=${statcastData.launch_speed}, LA=${statcastData.launch_angle}, Dist=${statcastData.hit_distance_sc}`);
+
+                analysisResult = await this.runHRAnalysis(statcastData, playerData.name, playerId);
+                if (!analysisResult || !analysisResult.success) {
+                    this.log(`HR analysis failed for ${playerData.name}, will retry...`);
+                    statcastData = null;
+                    analysisResult = null;
+                    continue;
+                }
+
+                this.log(`HR analysis complete for ${playerData.name}: ${analysisResult.total_dongs}/30 parks`);
+                break; // Got everything we need
+            } catch (error) {
+                this.log(`Statcast poll error for ${playerData.name}: ${error.message}`);
+            }
+        }
+
+        // Build and send the single combined message
         const messageOptions = this.buildAlertMessageOptions(
             playerId,
             playerData,
@@ -1394,199 +1364,32 @@ class BaseballBot {
             {
                 statcastData,
                 analysisResult,
-                footerText
+                footerText: (!statcastData) ? 'Statcast data was not available' : null
             }
         );
 
-        const deliveryResult = await this.sendToConfiguredChannels(messageOptions, 'combined alert');
-        this.log(`Combined alert sent to ${deliveryResult.successChannelIds.length}/${this.channelIds.length} channels for ${playerData.name}`);
+        const deliveryResult = await this.sendToConfiguredChannels(messageOptions, 'home-run-alert', pendingChannelIds);
 
-        // Store parks cleared count for this HR
+        if (deliveryResult.successChannelIds.length === 0) {
+            this.log(`Alert failed for ${playerData.name} HR ${hrId}; leaving pending`);
+            return false;
+        }
+
+        this.markHomeRunSentToChannels(playerData, hrId, deliveryResult.successChannelIds);
+
+        // Store parks cleared count
         if (analysisResult && Number.isFinite(analysisResult.total_dongs)) {
-            const hrId = this.buildHomeRunId(hrDetail);
             playerData.homeRunParks[hrId] = analysisResult.total_dongs;
-            this.saveState();
-            this.log(`Stored parks data for ${playerData.name}: HR ${hrId} cleared ${analysisResult.total_dongs}/30 parks`);
         }
-
-        this.cleanupAnalysisImage(analysisResult?.image_path);
-    }
-
-    async scheduleCombinedAlert(playerId, playerData, totalHRs, hrDetail) {
-        const INITIAL_DELAY = 30000;
-        const RETRY_INTERVAL = 60000;
-        const MAX_RETRIES = 6;
-        const gameId = hrDetail?.gameId;
-
-        this.log(`Scheduling combined alert for ${playerData.name} (game ${gameId})`);
-
-        await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
-
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (attempt > 0) {
-                this.log(`Retry ${attempt}/${MAX_RETRIES} for ${playerData.name} Statcast data...`);
-                await new Promise(resolve => setTimeout(resolve, RETRY_INTERVAL));
-            }
-
-            try {
-                const statcastData = await this.getStatcastDataForHR(playerId, hrDetail);
-                if (!statcastData) {
-                    this.log(`Statcast data not yet available for ${playerData.name} (attempt ${attempt + 1})`);
-                    continue;
-                }
-
-                this.log(`Got Statcast data for ${playerData.name}: EV=${statcastData.launch_speed}, LA=${statcastData.launch_angle}, Dist=${statcastData.hit_distance_sc}`);
-
-                const analysisResult = await this.runHRAnalysis(statcastData, playerData.name, playerId);
-                if (!analysisResult || !analysisResult.success) {
-                    this.log(`HR analysis failed for ${playerData.name}`);
-                    continue;
-                }
-
-                this.log(`HR analysis complete for ${playerData.name}: ${analysisResult.total_dongs}/30 parks`);
-                await this.sendCombinedHomeRunAlert(playerId, playerData, totalHRs, hrDetail, statcastData, analysisResult);
-                return;
-            } catch (error) {
-                this.log(`Combined alert attempt ${attempt + 1} error: ${error.message}`);
-            }
-        }
-
-        this.log(`Gave up on combined alert data for ${playerData.name} after ${MAX_RETRIES + 1} attempts; sending basic alert`);
-        await this.sendHomeRunAlert(playerId, playerData, totalHRs, 1, hrDetail);
-    }
-
-    async sendEnhancedFollowUp(playerData, totalHRs, statcastData, analysisResult) {
-        this.log(`Sending enhanced follow-up for ${playerData.name}...`);
-
-        const totalDongs = analysisResult.total_dongs;
-
-        // Color-coded embed
-        let embedColor;
-        if (totalDongs >= 25) {
-            embedColor = '#FF2222';  // Red — monster dong
-        } else if (totalDongs >= 15) {
-            embedColor = '#FFD700';  // Gold — solid dong
-        } else {
-            embedColor = '#888888';  // Gray — park-dependent
-        }
-
-        // Get wall height at home park from analysis results
-        const homeParkDetail = analysisResult.park_details.find(p => p.team === statcastData.home_team);
-        const wallHeight = homeParkDetail ? `${homeParkDetail.fence_height} ft` : 'N/A';
-        const wallDist = homeParkDetail ? `${Math.round(homeParkDetail.wall_distance)} ft` : 'N/A';
-
-        // Pitcher display with team abbreviation
-        const pitcherDisplay = (statcastData.pitcher_name && statcastData.pitcher_name !== 'Unknown')
-            ? (statcastData.pitcher_team ? `${statcastData.pitcher_name} (${statcastData.pitcher_team})` : statcastData.pitcher_name)
-            : null;
-
-        const embed = new Discord.EmbedBuilder()
-            .setTitle(`Statcast Details: ${playerData.name} HR #${totalHRs}`)
-            .addFields(this.buildCompactStatcastFields(
-                statcastData,
-                analysisResult,
-                wallHeight,
-                wallDist,
-                totalDongs,
-                pitcherDisplay
-            ))
-            .setColor(embedColor)
-            .setTimestamp();
-
-        // List parks where it would NOT be a HR (if 10 or fewer)
-        if (analysisResult.parks_not_cleared.length > 0 && analysisResult.parks_not_cleared.length <= 10) {
-            embed.addFields({
-                name: `Not a HR in (${analysisResult.parks_not_cleared.length})`,
-                value: analysisResult.parks_not_cleared.join(', '),
-                inline: true
-            });
-        }
-
-        // Prepare message options
-        const messageOptions = { embeds: [embed] };
-
-        // Attach image if available
-        if (analysisResult.image_path && fs.existsSync(analysisResult.image_path)) {
-            const attachment = new Discord.AttachmentBuilder(analysisResult.image_path, { name: 'ballpark_overlay.png' });
-            embed.setImage('attachment://ballpark_overlay.png');
-            messageOptions.files = [attachment];
-        }
-
-        // Send to all channels
-        let successCount = 0;
-        for (const channelId of this.channelIds) {
-            try {
-                const channel = await this.client.channels.fetch(channelId);
-                await channel.send(messageOptions);
-                successCount++;
-            } catch (error) {
-                this.log(`Error sending enhanced follow-up to channel ${channelId}: ${error.message}`);
-            }
-        }
-
-        this.log(`Enhanced follow-up sent to ${successCount}/${this.channelIds.length} channels for ${playerData.name}`);
 
         // Clean up temp image
-        if (analysisResult.image_path) {
-            try {
-                if (fs.existsSync(analysisResult.image_path)) {
-                    fs.unlinkSync(analysisResult.image_path);
-                }
-            } catch (cleanupError) {
-                this.log(`Image cleanup error: ${cleanupError.message}`);
-            }
-        }
-    }
-
-    async scheduleEnhancedFollowUp(playerId, playerData, totalHRs, hrDetail) {
-        const INITIAL_DELAY = 30000;   // 30 seconds
-        const RETRY_INTERVAL = 60000;  // 60 seconds
-        const MAX_RETRIES = 6;
-        const gameId = hrDetail?.gameId;
-
-        this.log(`Scheduling enhanced follow-up for ${playerData.name} (game ${gameId})`);
-
-        // Wait initial delay
-        await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
-
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-            if (attempt > 0) {
-                this.log(`Retry ${attempt}/${MAX_RETRIES} for ${playerData.name} Statcast data...`);
-                await new Promise(resolve => setTimeout(resolve, RETRY_INTERVAL));
-            }
-
-            try {
-                const statcastData = await this.getStatcastDataForHR(playerId, hrDetail);
-                if (!statcastData) {
-                    this.log(`Statcast data not yet available for ${playerData.name} (attempt ${attempt + 1})`);
-                    continue;
-                }
-
-                this.log(`Got Statcast data for ${playerData.name}: EV=${statcastData.launch_speed}, LA=${statcastData.launch_angle}, Dist=${statcastData.hit_distance_sc}`);
-
-                const analysisResult = await this.runHRAnalysis(statcastData, playerData.name, playerId);
-                if (!analysisResult || !analysisResult.success) {
-                    this.log(`HR analysis failed for ${playerData.name}`);
-                    continue;
-                }
-
-                this.log(`HR analysis complete for ${playerData.name}: ${analysisResult.total_dongs}/30 parks`);
-
-                // Store parks cleared count for this HR
-                if (Number.isFinite(analysisResult.total_dongs)) {
-                    const hrId = this.buildHomeRunId(hrDetail);
-                    playerData.homeRunParks[hrId] = analysisResult.total_dongs;
-                    this.saveState();
-                }
-
-                await this.sendEnhancedFollowUp(playerData, totalHRs, statcastData, analysisResult);
-                return; // Success — done
-            } catch (error) {
-                this.log(`Enhanced follow-up attempt ${attempt + 1} error: ${error.message}`);
-            }
+        if (analysisResult?.image_path) {
+            this.cleanupAnalysisImage(analysisResult.image_path);
         }
 
-        this.log(`Gave up on enhanced follow-up for ${playerData.name} after ${MAX_RETRIES + 1} attempts`);
+        const hadStatcast = statcastData ? 'with Statcast' : 'basic (no Statcast)';
+        this.log(`Sent combined alert ${hadStatcast} for ${playerData.name} HR ${hrId} to ${deliveryResult.successChannelIds.length} channel(s)`);
+        return true;
     }
 
     startMonitoring() {
@@ -2857,7 +2660,7 @@ class BaseballBot {
                 rbiDescription: randomHRType
             };
             
-            // Create the embed for test (same as sendHomeRunAlert but only send to current channel)
+            // Create the embed for test (only send to current channel)
             const hrType = testDetails.rbiDescription || 'Solo HR';
             const titleText = hrType === 'Grand Slam!' ? 
                 `${playerData.name.toUpperCase()} GRAND SLAM!` :
