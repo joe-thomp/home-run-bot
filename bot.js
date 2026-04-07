@@ -975,33 +975,10 @@ class BaseballBot {
         ];
     }
 
-    buildCombinedFollowUpFields(totalDongs, pitcherDisplay, statcastData = null, analysisResult = null) {
-        const fields = [];
-
-        if (statcastData) {
-            if (statcastData.launch_speed) {
-                fields.push({ name: 'Exit Velocity', value: `${statcastData.launch_speed.toFixed(1)} mph`, inline: true });
-            }
-            if (statcastData.launch_angle != null) {
-                fields.push({ name: 'Launch Angle', value: `${Number(statcastData.launch_angle).toFixed(0)}\u00b0`, inline: true });
-            }
-            if (analysisResult?.spray_direction) {
-                fields.push({ name: 'Spray Direction', value: analysisResult.spray_direction, inline: true });
-            }
-        }
-
-        if (analysisResult) {
-            const homeParkDetail = analysisResult.park_details?.find(p => p.team === statcastData?.home_team);
-            if (homeParkDetail) {
-                fields.push({ name: 'Wall Height', value: `${homeParkDetail.fence_height} ft`, inline: true });
-                fields.push({ name: 'Wall Distance', value: `${Math.round(homeParkDetail.wall_distance)} ft`, inline: true });
-            }
-        }
-
-        fields.push({ name: 'Parks Cleared', value: `${totalDongs}/30`, inline: true });
-        fields.push({ name: 'Off Pitcher', value: pitcherDisplay || 'N/A', inline: true });
-
-        return fields;
+    buildCombinedFollowUpFields(totalDongs) {
+        return [
+            { name: 'Parks Cleared', value: `${totalDongs}/30`, inline: true }
+        ];
     }
 
     getHomeRunAlertPresentation(playerData, details, statcastData = null) {
@@ -1079,25 +1056,7 @@ class BaseballBot {
             .setTimestamp();
 
         if (analysisResult) {
-            const pitcherDisplay = (statcastData?.pitcher_name && statcastData.pitcher_name !== 'Unknown')
-                ? (statcastData.pitcher_team ? `${statcastData.pitcher_name} (${statcastData.pitcher_team})` : statcastData.pitcher_name)
-                : 'N/A';
-
-            embed.addFields(this.buildCombinedFollowUpFields(
-                analysisResult.total_dongs,
-                pitcherDisplay,
-                statcastData,
-                analysisResult
-            ));
-
-            // List parks where it would NOT be a HR (if 10 or fewer)
-            if (analysisResult.parks_not_cleared?.length > 0 && analysisResult.parks_not_cleared.length <= 10) {
-                embed.addFields({
-                    name: `Not a HR in (${analysisResult.parks_not_cleared.length})`,
-                    value: analysisResult.parks_not_cleared.join(', '),
-                    inline: true
-                });
-            }
+            embed.addFields(this.buildCombinedFollowUpFields(analysisResult.total_dongs));
         }
 
         if (footerText) {
