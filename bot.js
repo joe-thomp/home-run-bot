@@ -883,8 +883,6 @@ class BaseballBot {
                             await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
                         );
                         
-                        const todayStr = new Date().toISOString().slice(0, 10);
-
                         const unseenHomeRuns = [];
                         for (let index = 0; index < allHomeRunDetails.length; index++) {
                             const hrDetail = allHomeRunDetails[index];
@@ -897,13 +895,6 @@ class BaseballBot {
 
                             const pendingChannelIds = this.getPendingChannelIdsForHomeRun(playerData, hrId);
                             if (pendingChannelIds.length > 0) {
-                                // Skip HRs from games not played today to avoid replaying old HRs on state reset
-                                if (hrDetail.gameDate && hrDetail.gameDate !== todayStr) {
-                                    this.log(`${playerData.name}: Skipping old HR ${hrId} from ${hrDetail.gameDate} (not today); marking as sent`);
-                                    this.markHomeRunSentToChannels(playerData, hrId, pendingChannelIds);
-                                    continue;
-                                }
-
                                 unseenHomeRuns.push({
                                     hrDetail,
                                     hrId,
