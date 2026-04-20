@@ -23,7 +23,7 @@ class BaseballBot {
         // Players to monitor
         this.players = {
             '592450': { name: 'Aaron Judge', team: 'NYY', number: '99', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
-            '665862': { name: 'Jazz Chisholm Jr.', team: 'NYY', number: '13', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
+            '700250': { name: 'Ben Rice', team: 'NYY', number: '22', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '665742': { name: 'Juan Soto', team: 'NYM', number: '22', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '660271': { name: 'Shohei Ohtani', team: 'LAD', number: '17', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
             '656941': { name: 'Kyle Schwarber', team: 'PHI', number: '12', lastCheckedHR: 0, sentHomeRuns: new Set(), homeRunParks: {} },
@@ -48,7 +48,7 @@ class BaseballBot {
     getPlayerHeadshotUrl(playerName) {
         const headshots = {
             'Aaron Judge': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/592450/headshot/67/current',
-            'Jazz Chisholm Jr.': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665862/headshot/67/current',
+            'Ben Rice': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/700250/headshot/67/current',
             'Juan Soto': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665742/headshot/67/current',
             'Shohei Ohtani': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/660271/headshot/67/current',
             'Kyle Schwarber': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/656941/headshot/67/current',
@@ -1370,8 +1370,8 @@ class BaseballBot {
             return;
         }
 
-        if (command === '!jazz') {
-            await this.sendPlayerStats('665862', message);
+        if (command === '!rice') {
+            await this.sendPlayerStats('700250', message);
             return;
         }
 
@@ -2240,7 +2240,7 @@ class BaseballBot {
                     this.players[id].name.toLowerCase().includes(args)
                 );
                 if (!playerId) {
-                    await message.reply(`Player "${args}" not found! Try: judge, soto, ohtani, etc.`);
+                    await message.reply(`Player "${args}" not found! Try: judge, rice, soto, ohtani, etc.`);
                     return;
                 }
                 playerData = this.players[playerId];
@@ -2616,7 +2616,7 @@ class BaseballBot {
             // Add player headshot
             const headshots = {
                 'Aaron Judge': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/592450/headshot/67/current',
-                'Jazz Chisholm Jr.': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665862/headshot/67/current',
+                'Ben Rice': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/700250/headshot/67/current',
                 'Juan Soto': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665742/headshot/67/current',
                 'Shohei Ohtani': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/660271/headshot/67/current',
                 'Kyle Schwarber': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/656941/headshot/67/current',
@@ -2645,7 +2645,7 @@ class BaseballBot {
             .setTitle('📊 Tracked Players')
             .setDescription(`Currently monitoring these players for home runs:\n\n${playerList}`)
             .addFields(
-                { name: 'Player Commands', value: '!judge, !jazz, !soto, !ohtani, !schwarber, !harper, !gunnar, !trout', inline: false },
+                { name: 'Player Commands', value: '!judge, !rice, !soto, !ohtani, !schwarber, !harper, !gunnar, !trout', inline: false },
                 { name: 'General Commands', value: '!hrstats, !parkstats, !players', inline: false },
                 { name: 'Admin Commands', value: '!forcecheck, !testhr, !reset [player], !debug', inline: false },
                 { name: 'Alert Channels', value: `Sending to ${this.channelIds.length} channel(s)`, inline: false }
@@ -2755,7 +2755,7 @@ class BaseballBot {
             // Set player headshot using MLB's official headshot URLs
             const headshots = {
                 'Aaron Judge': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/592450/headshot/67/current',
-                'Jazz Chisholm Jr.': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665862/headshot/67/current',
+                'Ben Rice': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/700250/headshot/67/current',
                 'Juan Soto': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/665742/headshot/67/current',
                 'Shohei Ohtani': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/660271/headshot/67/current',
                 'Kyle Schwarber': 'https://img.mlbstatic.com/mlb-photos/image/upload/d_people:generic:headshot:67:current.png/w_213,q_auto:best/v1/people/656941/headshot/67/current',
