@@ -43,6 +43,7 @@ class BaseballBot {
         this.lastCheckTime = null;
         this.checkInProgress = null;
         this.pendingNotifications = new Set(); // hrIds currently waiting for Statcast before sending
+        this.startupCatchUpPlayerIds = new Set(); // restored players only send the latest missed HR after restart
     }
 
     getPlayerHeadshotUrl(playerName) {
@@ -207,9 +208,18 @@ class BaseballBot {
         return this.channelIds.every(channelId => playerData.sentHomeRunsByChannel[channelId].has(hrId));
     }
 
-    countContiguousDeliveredHomeRuns(playerData, homeRunDetails) {
+    countContiguousDeliveredHomeRuns(playerData, homeRunDetails, checkpointFloor = 0) {
         let deliveredCount = 0;
-        for (const hrDetail of homeRunDetails) {
+        const safeCheckpointFloor = Math.max(0, parseInt(checkpointFloor, 10) || 0);
+
+        for (let index = 0; index < homeRunDetails.length; index++) {
+            const totalHomeRuns = index + 1;
+            if (totalHomeRuns <= safeCheckpointFloor) {
+                deliveredCount = totalHomeRuns;
+                continue;
+            }
+
+            const hrDetail = homeRunDetails[index];
             if (this.isFallbackHomeRunDetail(hrDetail)) {
                 break;
             }
@@ -373,6 +383,7 @@ class BaseballBot {
         this.log(`Configured to send alerts to ${this.channelIds.length} channel(s): ${this.channelIds.join(', ')}`);
         
         const restoredPlayers = this.loadState();
+        this.startupCatchUpPlayerIds = new Set(restoredPlayers);
 
         for (const playerId of Object.keys(this.players)) {
             if (restoredPlayers.has(playerId)) {
@@ -424,8 +435,13 @@ class BaseballBot {
     }
 
     async getPlayerHomeRuns(playerId) {
+        const total = await this.getPlayerHomeRunTotal(playerId);
+        return total === null ? 0 : total;
+    }
+
+    async getPlayerHomeRunTotal(playerId) {
         const stats = await this.getPlayerStats(playerId);
-        return stats ? parseInt(stats.homeRuns) || 0 : 0;
+        return stats ? parseInt(stats.homeRuns) || 0 : null;
     }
 
     async getRecentHomeRunDetails(playerId, newHomeRunCount = 1) {
@@ -871,22 +887,34 @@ class BaseballBot {
             for (const [playerId, playerData] of Object.entries(this.players)) {
                 try {
                     this.ensurePlayerDeliveryState(playerData);
-                    const currentHomeRuns = await this.getPlayerHomeRuns(playerId);
+                    const startupCatchUpActive = this.startupCatchUpPlayerIds.has(playerId);
+                    const currentHomeRuns = await this.getPlayerHomeRunTotal(playerId);
+                    if (currentHomeRuns === null) {
+                        this.log(`${playerData.name}: could not confirm current HR total; keeping existing checkpoint`);
+                        continue;
+                    }
+
+                    const previousCheckpoint = Math.max(0, parseInt(playerData.lastCheckedHR, 10) || 0);
                     
-                    this.log(`${playerData.name}: Current=${currentHomeRuns}, Last=${playerData.lastCheckedHR}`);
+                    this.log(`${playerData.name}: Current=${currentHomeRuns}, Last=${previousCheckpoint}`);
                     
-                    if (currentHomeRuns > playerData.lastCheckedHR) {
-                        const newHomeRuns = currentHomeRuns - playerData.lastCheckedHR;
-                        this.log(`🚨 NEW HOME RUN DETECTED! ${playerData.name} went from ${playerData.lastCheckedHR} to ${currentHomeRuns} (+${newHomeRuns})`);
+                    if (currentHomeRuns > previousCheckpoint) {
+                        const newHomeRuns = currentHomeRuns - previousCheckpoint;
+                        this.log(`🚨 NEW HOME RUN DETECTED! ${playerData.name} went from ${previousCheckpoint} to ${currentHomeRuns} (+${newHomeRuns})`);
                         
                         const allHomeRunDetails = this.sortHomeRunDetailsChronologically(
                             await this.getRecentHomeRunDetails(playerId, currentHomeRuns)
                         );
                         
-                        const unseenHomeRuns = [];
+                        let unseenHomeRuns = [];
                         for (let index = 0; index < allHomeRunDetails.length; index++) {
                             const hrDetail = allHomeRunDetails[index];
                             const hrId = this.buildHomeRunId(hrDetail);
+                            const totalHomeRuns = index + 1;
+
+                            if (totalHomeRuns <= previousCheckpoint) {
+                                continue;
+                            }
 
                             // Skip HRs already being processed by a pending notification
                             if (this.pendingNotifications.has(hrId)) {
@@ -899,9 +927,27 @@ class BaseballBot {
                                     hrDetail,
                                     hrId,
                                     pendingChannelIds,
-                                    totalHomeRuns: index + 1
+                                    totalHomeRuns
                                 });
                             }
+                        }
+
+                        let checkpointFloor = previousCheckpoint;
+                        if (startupCatchUpActive && unseenHomeRuns.length > 1) {
+                            const latestUnseenHomeRun = unseenHomeRuns[unseenHomeRuns.length - 1];
+                            const skippedHomeRuns = unseenHomeRuns.slice(0, -1);
+
+                            for (const { hrId } of skippedHomeRuns) {
+                                this.markHomeRunSentToChannels(playerData, hrId, this.channelIds);
+                            }
+
+                            checkpointFloor = Math.max(
+                                checkpointFloor,
+                                latestUnseenHomeRun.totalHomeRuns - 1
+                            );
+                            unseenHomeRuns = [latestUnseenHomeRun];
+
+                            this.log(`${playerData.name}: startup catch-up skipped ${skippedHomeRuns.length} older missed home run(s); keeping only HR #${latestUnseenHomeRun.totalHomeRuns}`);
                         }
 
                         const dispatchableHomeRuns = unseenHomeRuns.filter(({ hrDetail }) => !this.isFallbackHomeRunDetail(hrDetail));
@@ -930,12 +976,17 @@ class BaseballBot {
 
                         this.players[playerId].lastCheckedHR = Math.min(
                             currentHomeRuns,
-                            this.countContiguousDeliveredHomeRuns(playerData, allHomeRunDetails)
+                            this.countContiguousDeliveredHomeRuns(playerData, allHomeRunDetails, checkpointFloor)
                         );
                         if (this.players[playerId].lastCheckedHR < currentHomeRuns) {
                             this.log(`${playerData.name}: only fully delivered ${this.players[playerId].lastCheckedHR}/${currentHomeRuns} tracked home run(s); leaving the remainder pending for retry`);
                         }
                         this.saveState();
+                    }
+
+                    if (startupCatchUpActive && currentHomeRuns <= this.players[playerId].lastCheckedHR) {
+                        this.startupCatchUpPlayerIds.delete(playerId);
+                        this.log(`${playerData.name}: startup catch-up complete`);
                     }
                 } catch (error) {
                     this.log(`Error checking ${playerData.name}: ${error.message}`);
@@ -1353,6 +1404,13 @@ class BaseballBot {
         
         this.log('Started monitoring for home runs from your selected star players!');
         this.log('Checking every 4 minutes year-round so Opening Day and late-season games are not missed');
+
+        if (this.startupCatchUpPlayerIds.size > 0) {
+            this.log('Running startup catch-up check now; older missed home runs will be skipped');
+            this.checkForNewHomeRuns().catch(error => {
+                this.log(`Startup catch-up check failed: ${error.message}`);
+            });
+        }
     }
 
     async handleCommand(message) {

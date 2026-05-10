@@ -4,7 +4,7 @@ Discord bot that watches MLB players and posts to your server when they hit a ho
 
 The bot polls the [MLB Stats API](https://statsapi.mlb.com) every 4 minutes. When it finds a new homer, it sends a Discord embed with the player, distance, and RBI count. A few seconds later, it grabs Statcast data from [Baseball Savant](https://baseballsavant.mlb.com), generates a ballpark overlay image (exit velo, launch angle, spray direction, wall clearance), and posts that too.
 
-State lives on disk. Restarts don't re-send old alerts.
+State lives on disk. Restarts don't re-send old alerts, and if the bot was offline long enough to miss several homers, startup catch-up skips the older missed ones and only keeps the newest homer eligible for an alert.
 
 ## Data sources
 
@@ -105,7 +105,7 @@ The bot checks each tracked player's HR total every 4 minutes via the MLB Stats 
 3. Runs `scripts/hr_analysis.py` to render a ballpark image showing the hit's trajectory, landing spot, and wall clearance.
 4. Posts a follow-up embed with the image and full Statcast breakdown.
 
-Tracking state saves to `data/bot_state.json` after every check. The bot skips home runs it already reported, even across restarts.
+Tracking state saves to `data/bot_state.json` after every check. The bot skips home runs it already reported, even across restarts. On restart, restored players run one catch-up pass that marks older missed home runs as skipped and only sends or retries the most recent missed home run.
 
 ## Files
 
